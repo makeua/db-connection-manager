@@ -5,10 +5,8 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Objects;
-import java.util.Set;
+import java.text.SimpleDateFormat;
+import java.util.*;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -20,6 +18,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class ConnectionPoolImpl implements ConnectionPool {
     private static final Logger LOG = LoggerFactory.getLogger(ConnectionPoolImpl.class);
+
+    private static final SimpleDateFormat FORMAT = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
 
     private final ConnectionSupplier connectionSupplier;
     private final CredentialConnectionSupplier credentialConnectionSupplier;
@@ -68,20 +68,17 @@ final class ConnectionPoolImpl implements ConnectionPool {
     }
 
     @Override
-    public void close() throws SQLException {
-        try {
-            LOG.trace("ConnectionPoolImpl::close() started");
-            for (PooledConnection connection : activePooledConnections) {
+    public void close() {
+        LOG.trace("ConnectionPoolImpl::close() started");
+        for (PooledConnection connection : activePooledConnections) {
+            closePooledConnection(connection);
+        }
+        for (BlockingDeque<PooledConnection> connections : pooledConnections.values()) {
+            for (PooledConnection connection : connections) {
                 closePooledConnection(connection);
             }
-            for (BlockingDeque<PooledConnection> connections : pooledConnections.values()) {
-                for (PooledConnection connection : connections) {
-                    closePooledConnection(connection);
-                }
-            }
-        } finally {
-            LOG.trace("ConnectionPoolImpl::close() finished");
         }
+        LOG.trace("ConnectionPoolImpl::close() finished");
     }
 
     private BlockingDeque<PooledConnection> getPooledConnectionDeque(PooledConnectionKey pooledConnectionKey) {
@@ -94,23 +91,19 @@ final class ConnectionPoolImpl implements ConnectionPool {
                 LOG.trace("ConnectionPoolImpl::getConnection(PooledConnection pooledConnection) started");
 
                 BlockingDeque<PooledConnection> pooledConnectionsDeque = getPooledConnectionDeque(pooledConnectionKey);
-                LOG.trace("Amount of current connections: {}", connectionNumber.get());
+                LOG.debug("Amount of current connections: {}", connectionNumber.get());
                 if (connectionNumber.get() < maxPoolSize && pooledConnectionsDeque.isEmpty()) {
                     pooledConnectionsDeque.add(createNewConnection(pooledConnectionKey));
                 }
 
-                LOG.trace("Getting connection from the queue...");
+                LOG.debug("Getting connection from the queue...");
                 PooledConnection pooledConnection;
                 while ((pooledConnection = pooledConnectionsDeque.poll()) == null) {
                     // waiting for an available connection
                 }
-                LOG.trace("Connection got from the queue");
+                LOG.debug("Connection got from the queue");
 
-                // if it's time for the connection to be closed and renewed
-                LOG.trace("Checking connection alive time");
-                if ((System.currentTimeMillis() - pooledConnection.getCreationTime()) > connectionTTL) {
-                    LOG.trace("Connection TTL is up, closing and creating new");
-                    closePooledConnection(pooledConnection);
+                if (closeIfNeeded(pooledConnection)) {
                     pooledConnection = createNewConnection(pooledConnectionKey);
                 }
                 activePooledConnections.add(pooledConnection);
@@ -125,27 +118,50 @@ final class ConnectionPoolImpl implements ConnectionPool {
         try {
             LOG.trace("ConnectionPoolImpl::createNewConnection(PooledConnection pooledConnection) started");
 
+            Connection connection = pooledConnectionKey.isCredentials()
+                    ? credentialConnectionSupplier.get(pooledConnectionKey.getUsername(), pooledConnectionKey.getPassword())
+                    : connectionSupplier.get();
+
             connectionNumber.incrementAndGet();
             return new PooledConnection(
                     pooledConnectionKey,
                     System.currentTimeMillis(),
                     this,
-                    pooledConnectionKey.isCredentials()
-                            ? credentialConnectionSupplier.get(pooledConnectionKey.getUsername(), pooledConnectionKey.getPassword())
-                            : connectionSupplier.get());
+                    connection);
         } finally {
             LOG.trace("ConnectionPoolImpl::createNewConnection(PooledConnection pooledConnection) finished");
         }
     }
 
-    private void closePooledConnection(PooledConnection pooledConnection) throws SQLException {
+    private boolean closeIfNeeded(PooledConnection pooledConnection) {
+        long currentTime = System.currentTimeMillis();
+        long aliveTime = currentTime - pooledConnection.getCreationTime();
+        LOG.debug("Checking connection alive time, created at [{}], current [{}], alive time [{} s], TTL [{} s]",
+                FORMAT.format(new Date(pooledConnection.getCreationTime())),
+                FORMAT.format(new Date(currentTime)),
+                aliveTime / 1000.0,
+                connectionTTL / 1000.0);
+        if ((currentTime - pooledConnection.getCreationTime()) > connectionTTL) {
+            LOG.debug("Connection time to live is over, closing and creating new");
+            closePooledConnection(pooledConnection);
+            return true;
+        }
+        return false;
+    }
+
+    private void closePooledConnection(PooledConnection pooledConnection) {
         LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) started");
 
         connectionNumber.decrementAndGet();
 
-        LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) connection close started");
-        pooledConnection.getUnderlyingConnection().close();
-        LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) connection close finished");
+        try {
+            LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) connection close started");
+            pooledConnection.getUnderlyingConnection().close();
+        } catch (SQLException e) {
+            LOG.debug("Failed to close pooled connection");
+        } finally {
+            LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) connection close finished");
+        }
 
         LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) finished");
     }
