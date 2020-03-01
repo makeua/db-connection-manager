@@ -31,13 +31,11 @@ public class ConnectionManagedDataSourceFactory {
                                 .build()),
                 pooledDataSourceFactory.createPooledDataSource(
                         slave,
-                        slaveConnectionPoolConfig.toBuilder()
-                                .maxPoolSize(slaveConnectionPoolConfig.getMaxPoolSize() + 1)
-                                .build()),
+                        slaveConnectionPoolConfig),
                 createCheckerExecutorService());
     }
 
     private ExecutorService createCheckerExecutorService() {
-        return Executors.newFixedThreadPool(2);
+        return Executors.newFixedThreadPool(1);
     }
 }

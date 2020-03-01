@@ -103,7 +103,7 @@ final class ConnectionPoolImpl implements ConnectionPool {
                 }
                 LOG.debug("Connection got from the queue");
 
-                if (closeIfNeeded(pooledConnection)) {
+                if (closeIfAlreadyClosed(pooledConnection) || closeIfTTLOver(pooledConnection)) {
                     pooledConnection = createNewConnection(pooledConnectionKey);
                 }
                 activePooledConnections.add(pooledConnection);
@@ -133,20 +133,44 @@ final class ConnectionPoolImpl implements ConnectionPool {
         }
     }
 
-    private boolean closeIfNeeded(PooledConnection pooledConnection) {
-        long currentTime = System.currentTimeMillis();
-        long aliveTime = currentTime - pooledConnection.getCreationTime();
-        LOG.debug("Checking connection alive time, created at [{}], current [{}], alive time [{} s], TTL [{} s]",
-                FORMAT.format(new Date(pooledConnection.getCreationTime())),
-                FORMAT.format(new Date(currentTime)),
-                aliveTime / 1000.0,
-                connectionTTL / 1000.0);
-        if ((currentTime - pooledConnection.getCreationTime()) > connectionTTL) {
-            LOG.debug("Connection time to live is over, closing and creating new");
+    private boolean closeIfAlreadyClosed(PooledConnection pooledConnection) {
+        try {
+            LOG.trace("ConnectionPoolImpl::closeIfAlreadyClosed(PooledConnection pooledConnection) started");
+            if (pooledConnection.isClosed()) {
+                closePooledConnection(pooledConnection);
+                return true;
+            }
+            return false;
+        } catch (SQLException e) {
+            LOG.debug("Failed to check isClosed on a connection:", e);
             closePooledConnection(pooledConnection);
             return true;
+        } finally {
+            LOG.trace("ConnectionPoolImpl::closeIfAlreadyClosed(PooledConnection pooledConnection) finished");
         }
-        return false;
+    }
+
+    private boolean closeIfTTLOver(PooledConnection pooledConnection) {
+        try {
+            LOG.trace("ConnectionPoolImpl::closeIfTTLOver(PooledConnection pooledConnection) started");
+
+            long currentTime = System.currentTimeMillis();
+            long aliveTime = currentTime - pooledConnection.getCreationTime();
+
+            LOG.debug("Checking connection alive time, created at [{}], current [{}], alive time [{} s], TTL [{} s]",
+                    FORMAT.format(new Date(pooledConnection.getCreationTime())),
+                    FORMAT.format(new Date(currentTime)),
+                    aliveTime / 1000.0,
+                    connectionTTL / 1000.0);
+            if ((currentTime - pooledConnection.getCreationTime()) > connectionTTL) {
+                LOG.debug("Connection time to live is over, closing and creating new");
+                closePooledConnection(pooledConnection);
+                return true;
+            }
+            return false;
+        } finally {
+            LOG.trace("ConnectionPoolImpl::closeIfTTLOver(PooledConnection pooledConnection) finished");
+        }
     }
 
     private void closePooledConnection(PooledConnection pooledConnection) {
@@ -158,7 +182,7 @@ final class ConnectionPoolImpl implements ConnectionPool {
             LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) connection close started");
             pooledConnection.getUnderlyingConnection().close();
         } catch (SQLException e) {
-            LOG.debug("Failed to close pooled connection");
+            LOG.debug("Failed to close pooled connection:", e);
         } finally {
             LOG.trace("ConnectionPoolImpl::closePooledConnection(PooledConnection pooledConnection) connection close finished");
         }
